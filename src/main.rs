@@ -5,6 +5,8 @@ use serde::Deserialize;
 use std::fs::File;
 use std::io;
 
+const PRET_ROOT: &str = env!("PRET_ROOT");
+
 #[derive(Debug, Clone, Deserialize)]
 struct LayoutsTable {
     layouts_table_label: String,
@@ -31,8 +33,9 @@ const POWER_PLANT_METATILE_DIR: &str =
     concat!(env!("PRET_ROOT"), "/data/tilesets/secondary/power_plant");
 
 fn main() -> io::Result<()> {
+    env_logger::init();
     let layouts = {
-        let mut file = File::open(LAYOUTS_FILE)?;
+        let file = File::open(LAYOUTS_FILE)?;
         let layouts_table: LayoutsTable = serde_json::from_reader(file).unwrap();
         layouts_table.layouts
     };
@@ -42,16 +45,15 @@ fn main() -> io::Result<()> {
         .find(|layout| layout.id.as_str() == "LAYOUT_POWER_PLANT")
         .unwrap();
     let name = layout.name.strip_suffix("_Layout").unwrap();
-    println!("{:#?}", layout);
+    log::info!("{:#?}", layout);
     let primary = layout
         .primary_tileset
         .strip_prefix("gTileset_")
         .unwrap()
         .to_ascii_lowercase();
     let secondary = tileset_dir(layout.secondary_tileset.strip_prefix("gTileset_").unwrap());
-    let primary_tileset_dir = format!("{}/data/tilesets/primary/{primary}", env!("PRET_ROOT"));
-    let secondary_tileset_dir =
-        format!("{}/data/tilesets/secondary/{secondary}", env!("PRET_ROOT"));
+    let primary_tileset_dir = format!("{PRET_ROOT}/data/tilesets/primary/{primary}");
+    let secondary_tileset_dir = format!("{PRET_ROOT}/data/tilesets/secondary/{secondary}");
 
     let map_data = MapData::from_files(
         format!("{}/{}", env!("PRET_ROOT"), layout.blockdata_filepath),
@@ -86,12 +88,12 @@ fn main() -> io::Result<()> {
                     }
                 }
             } else {
-                println!("Failed to get metatile image at coordinate: ({col}, {row})");
+                log::error!("Failed to get metatile image at coordinate: ({col}, {row})");
             }
         }
     }
 
-    map_image.save("/tmp/render.png");
+    map_image.save("/tmp/render.png").unwrap();
 
     Ok(())
 }

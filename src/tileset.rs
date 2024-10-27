@@ -1,3 +1,4 @@
+use crate::palette::{parse_all_palettes, Palette};
 use byteorder::{LittleEndian, ReadBytesExt};
 use image::{GrayImage, ImageBuffer, Luma, RgbImage};
 use png::Decoder;
@@ -6,26 +7,31 @@ use std::{
     path::Path,
 };
 
+#[derive(Debug)]
 pub struct LayoutTileset {
     primary: Tileset,
     secondary: Tileset,
 }
 
+#[derive(Debug)]
 pub struct Tileset {
     metatiles: Vec<Metatile>,
     tile_image: TilesetImage,
     palettes: Vec<Palette>,
 }
 
+#[derive(Debug)]
 pub struct Metatile {
     tiles: [TileData; 8],
     attributes: MetatileAttributes,
 }
 
+#[derive(Debug)]
 pub struct MetatileAttributes {
     layer_type: LayerType,
 }
 
+#[derive(Debug)]
 pub enum LayerType {
     MiddleTop,
     BottomMiddle,
@@ -42,13 +48,14 @@ impl From<u32> for MetatileAttributes {
         } else if value == 2 {
             LayerType::BottomTop
         } else {
-            unimplemented!()
+            LayerType::MiddleTop
         };
 
         MetatileAttributes { layer_type }
     }
 }
 
+#[derive(Debug)]
 pub struct TileData {
     tile_id: u16,
     flip_horizontal: bool,
@@ -71,10 +78,11 @@ impl LayoutTileset {
         let end_of_primary = self.primary.metatiles.len();
         let end_of_secondary = self.secondary.metatiles.len() + end_of_primary;
         if metatile_id < end_of_primary {
+            log::debug!("Primary; metatile id: {metatile_id}");
             self.primary.get_metatile_image(metatile_id)
         } else if metatile_id >= end_of_primary && metatile_id < end_of_secondary {
-            self.secondary
-                .get_metatile_image(metatile_id - end_of_primary)
+            log::debug!("Secondary; metatile id: {metatile_id}");
+            self.secondary.get_metatile_image(metatile_id - 640) //end_of_primary)
         } else {
             None
         }
@@ -108,8 +116,8 @@ impl Tileset {
         let metatile = &self.metatiles[relative_metatile_id];
         let mut metatile_image: RgbImage = ImageBuffer::new(16, 16);
         for layer in 0..2 {
-            for row in 0..2 {
-                for col in 0..2 {
+            for col in 0..2 {
+                for row in 0..2 {
                     let tile_idx = (layer * 4 + row * 2 + col) as usize;
                     if let Some(tile_image) =
                         self.get_tile_image(&metatile.tiles[tile_idx], &self.tile_image)
@@ -122,6 +130,11 @@ impl Tileset {
                                     tile_image.get_pixel(pixel_col, pixel_row).0;
                             }
                         }
+                    } else {
+                        log::error!(
+                            "Failed to get tile image for tile id {}",
+                            &metatile.tiles[tile_idx].tile_id
+                        );
                     }
                 }
             }
@@ -134,8 +147,8 @@ impl Tileset {
         tile_data: &TileData,
         tileset_image: &TilesetImage,
     ) -> Option<RgbImage> {
-        let mut tile_image: RgbImage = ImageBuffer::new(8, 8);
         let gray_tile = tileset_image.get_tile(tile_data.tile_id.into())?;
+        let mut tile_image: RgbImage = ImageBuffer::new(8, 8);
         for row in 0..8 {
             for col in 0..8 {
                 let tile_row = if !tile_data.flip_vertical {
@@ -149,8 +162,8 @@ impl Tileset {
                     7 - col
                 };
 
-                let palette_value = self.palettes[tile_data.palette_number as usize].inner
-                    [gray_tile.get_pixel(tile_col, tile_row).0[0] as usize];
+                let palette_value = self.palettes[tile_data.palette_number as usize]
+                    .get(gray_tile.get_pixel(tile_col, tile_row).0[0] as usize);
                 tile_image.get_pixel_mut(col, row).0 =
                     [palette_value.0, palette_value.1, palette_value.2];
             }
@@ -162,7 +175,7 @@ impl Tileset {
 impl From<u16> for TileData {
     fn from(value: u16) -> Self {
         TileData {
-            tile_id: value & 0x3ff,
+            tile_id: (value & 0x3ff).saturating_sub(640),
             flip_horizontal: (value & 0x400) != 0,
             flip_vertical: (value & 0x800) != 0,
             palette_number: ((value & 0xf000) >> 12) as u8,
@@ -184,37 +197,29 @@ fn parse_metatile_files(
 
     const METATILE_SIZE: usize = 8 * 2;
     if metatile_raw_data.len() % METATILE_SIZE != 0 {
-        return Err(std::io::ErrorKind::InvalidData.into());
+        return Err(io::ErrorKind::InvalidData.into());
     }
     const ATTR_SIZE: usize = 4;
     if attrs_raw_data.len() % ATTR_SIZE != 0 {
-        return Err(std::io::ErrorKind::InvalidData.into());
+        return Err(io::ErrorKind::InvalidData.into());
     }
 
     let mut metatiles = vec![];
-    let mut cursor = std::io::Cursor::new(&metatile_raw_data);
-    let mut attr_cursor = std::io::Cursor::new(&attrs_raw_data);
+    let mut cursor = io::Cursor::new(&metatile_raw_data);
+    let mut attr_cursor = io::Cursor::new(&attrs_raw_data);
     while cursor.position() != metatile_raw_data.len() as u64 {
         let attr_data = attr_cursor.read_u32::<LittleEndian>()?;
         let attr = MetatileAttributes::from(attr_data);
 
-        let mut tile_data: [u16; 8] = [0u16; 8];
-        for tile_idx in 0..tile_data.len() {
-            let tile = cursor.read_u16::<LittleEndian>()?;
-            tile_data[tile_idx] = tile;
-        }
-        let tile_data = [
-            TileData::from(tile_data[0]),
-            TileData::from(tile_data[1]),
-            TileData::from(tile_data[2]),
-            TileData::from(tile_data[3]),
-            TileData::from(tile_data[4]),
-            TileData::from(tile_data[5]),
-            TileData::from(tile_data[6]),
-            TileData::from(tile_data[7]),
-        ];
+        let tile_data = (0..8)
+            .into_iter()
+            .map(|_| {
+                let tile = cursor.read_u16::<LittleEndian>()?;
+                Ok(TileData::from(tile))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
         metatiles.push(Metatile {
-            tiles: tile_data,
+            tiles: tile_data.try_into().unwrap(),
             attributes: attr,
         });
     }
@@ -222,6 +227,7 @@ fn parse_metatile_files(
     Ok(metatiles)
 }
 
+#[derive(Debug)]
 pub struct TilesetImage {
     tileset_data: Vec<u8>,
     tile_width: usize,
@@ -257,6 +263,10 @@ impl TilesetImage {
 
             Some(tile_image)
         } else {
+            log::error!(
+                "Out of range: {tile_id}, max: {}",
+                self.tile_height * self.tile_width
+            );
             None
         }
     }
@@ -284,59 +294,5 @@ fn parse_tileset_png(path: impl AsRef<Path>) -> io::Result<TilesetImage> {
         tileset_data,
         tile_width,
         tile_height,
-    })
-}
-
-pub struct Palette {
-    inner: [(u8, u8, u8); 16],
-}
-
-fn parse_all_palettes(path: impl AsRef<Path>) -> io::Result<Vec<Palette>> {
-    std::fs::read_dir(path)?
-        .into_iter()
-        .filter_map(|entry| {
-            if let Ok(entry) = entry {
-                if entry
-                    .path()
-                    .extension()
-                    .unwrap_or_default()
-                    .to_os_string()
-                    .to_str()
-                    .unwrap()
-                    == "pal"
-                {
-                    Some(entry.path())
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-        .map(|palette_path| parse_palette(&palette_path))
-        .collect::<io::Result<_>>()
-}
-
-fn parse_palette(path: impl AsRef<Path>) -> io::Result<Palette> {
-    // Parses a JASC-PAL file
-    let palette_contents = std::fs::read_to_string(path)?;
-    let mut lines = palette_contents.lines();
-    let mut palette_data = [(0, 0, 0); 16];
-    if let (Some("JASC-PAL"), Some("0100"), Some("16")) = (lines.next(), lines.next(), lines.next())
-    {
-        for palette_id in 0..16 {
-            let palette_values = lines
-                .next()
-                .unwrap()
-                .split_ascii_whitespace()
-                .map(|value| value.parse::<u8>().unwrap())
-                .collect::<Vec<_>>();
-            assert_eq!(palette_values.len(), 3);
-            palette_data[palette_id] = (palette_values[0], palette_values[1], palette_values[2]);
-        }
-    }
-
-    Ok(Palette {
-        inner: palette_data,
     })
 }

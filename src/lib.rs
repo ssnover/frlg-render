@@ -1,6 +1,7 @@
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::{io::Read, path::Path};
 
+pub mod palette;
 pub mod tileset;
 
 pub struct MapData {
