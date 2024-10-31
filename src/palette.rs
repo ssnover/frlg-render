@@ -28,7 +28,6 @@ fn palette_number(path: &Path) -> u32 {
 
 pub fn parse_all_palettes(path: impl AsRef<Path>) -> io::Result<Vec<Palette>> {
     let mut palettes = std::fs::read_dir(path)?
-        .into_iter()
         .filter_map(|entry| {
             if let Ok(entry) = entry {
                 if is_pal_file(&entry.path()) {
@@ -56,7 +55,7 @@ fn parse_palette(path: impl AsRef<Path>) -> io::Result<Palette> {
     if let (Some("JASC-PAL"), Some("0100"), Some("16")) = (lines.next(), lines.next(), lines.next())
     {
         log::debug!("Loading palette {}", path.as_ref().display());
-        for palette_id in 0..16 {
+        for (palette_id, palette_item) in palette_data.iter_mut().enumerate() {
             let palette_values = lines
                 .next()
                 .unwrap()
@@ -65,7 +64,7 @@ fn parse_palette(path: impl AsRef<Path>) -> io::Result<Palette> {
                 .collect::<Vec<_>>();
             assert_eq!(palette_values.len(), 3);
             log::debug!("Entry {palette_id}: {palette_values:?}");
-            palette_data[palette_id] = (palette_values[0], palette_values[1], palette_values[2]);
+            *palette_item = (palette_values[0], palette_values[1], palette_values[2]);
         }
     }
 

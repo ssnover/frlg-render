@@ -1,26 +1,36 @@
+use clap::Parser;
 use convert_case::Casing;
-use frlg_render::{tileset, MapData};
-use image::{ImageBuffer, RgbImage};
+use frlg_render::{map, tileset, METATILE_DIMENSION};
+use image::{GenericImage, ImageBuffer, RgbImage};
 use serde::Deserialize;
 use std::fs::File;
 use std::io;
+use std::path::PathBuf;
 
 const PRET_ROOT: &str = env!("PRET_ROOT");
 
+#[derive(Parser)]
+struct Args {
+    #[arg(long)]
+    /// The layout to render, e.g. LAYOUT_POWER_PLANT
+    layout: Option<String>,
+
+    #[arg(short, long)]
+    /// The output path for the rendered png image, default is /tmp/render.png
+    output: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct LayoutsTable {
-    layouts_table_label: String,
+    //layouts_table_label: String,
     layouts: Vec<Layout>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct Layout {
     id: String,
-    name: String,
     width: u32,
     height: u32,
-    border_width: u32,
-    border_height: u32,
     primary_tileset: String,
     secondary_tileset: String,
     border_filepath: String,
@@ -28,23 +38,27 @@ struct Layout {
 }
 
 const LAYOUTS_FILE: &str = concat!(env!("PRET_ROOT"), "/data/layouts/layouts.json");
-const BUILDINGS_METATILE_DIR: &str = concat!(env!("PRET_ROOT"), "/data/tilesets/primary/building");
-const POWER_PLANT_METATILE_DIR: &str =
-    concat!(env!("PRET_ROOT"), "/data/tilesets/secondary/power_plant");
 
 fn main() -> io::Result<()> {
     env_logger::init();
+
+    let args = Args::parse();
+    let map = args.layout.unwrap_or("LAYOUT_POWER_PLANT".to_string());
+    let output_file = args.output.unwrap_or(PathBuf::from("/tmp/render.png"));
+
     let layouts = {
         let file = File::open(LAYOUTS_FILE)?;
         let layouts_table: LayoutsTable = serde_json::from_reader(file).unwrap();
         layouts_table.layouts
     };
 
-    let layout = layouts
+    let Some(layout) = layouts
         .into_iter()
-        .find(|layout| layout.id.as_str() == "LAYOUT_POWER_PLANT")
-        .unwrap();
-    let name = layout.name.strip_suffix("_Layout").unwrap();
+        .find(|layout| layout.id.as_str() == map.as_str())
+    else {
+        log::error!("No layout matching name {map} found");
+        std::process::exit(1);
+    };
     log::info!("{:#?}", layout);
     let primary = layout
         .primary_tileset
@@ -55,19 +69,16 @@ fn main() -> io::Result<()> {
     let primary_tileset_dir = format!("{PRET_ROOT}/data/tilesets/primary/{primary}");
     let secondary_tileset_dir = format!("{PRET_ROOT}/data/tilesets/secondary/{secondary}");
 
-    let map_data = MapData::from_files(
+    let map_layout = map::Layout::load(
+        layout.width,
+        layout.height,
         format!("{}/{}", env!("PRET_ROOT"), layout.blockdata_filepath),
         format!("{}/{}", env!("PRET_ROOT"), layout.border_filepath),
     )?;
-    assert_eq!(
-        map_data.metatiles.len(),
-        (layout.width * layout.height) as usize
-    );
 
     let tileset =
         tileset::LayoutTileset::load_from_paths(primary_tileset_dir, secondary_tileset_dir)?;
 
-    const METATILE_DIMENSION: u32 = 16;
     let mut map_image: RgbImage = ImageBuffer::new(
         METATILE_DIMENSION * layout.width,
         METATILE_DIMENSION * layout.height,
@@ -75,25 +86,27 @@ fn main() -> io::Result<()> {
 
     for row in 0..layout.height {
         for col in 0..layout.width {
-            let metatile_data = &map_data.metatiles[((row * layout.width) + col) as usize];
+            let metatile_data = map_layout.get_metatile(row, col).unwrap();
             let metatile_left_pixel = col * METATILE_DIMENSION;
             let metatile_top_pixel = row * METATILE_DIMENSION;
+            log::debug!("Metatile id: {}", metatile_data.metatile_id);
             if let Some(metatile_image) = tileset.get_metatile_image(metatile_data.metatile_id) {
-                for pixel_row in 0..METATILE_DIMENSION {
-                    for pixel_col in 0..METATILE_DIMENSION {
-                        let output_row = metatile_top_pixel + pixel_row;
-                        let output_col = metatile_left_pixel + pixel_col;
-                        map_image.get_pixel_mut(output_col, output_row).0 =
-                            metatile_image.get_pixel(pixel_col, pixel_row).0;
-                    }
-                }
+                map_image
+                    .sub_image(
+                        metatile_left_pixel,
+                        metatile_top_pixel,
+                        METATILE_DIMENSION,
+                        METATILE_DIMENSION,
+                    )
+                    .copy_from(&metatile_image, 0, 0)
+                    .expect("Should be able to copy into subimage");
             } else {
                 log::error!("Failed to get metatile image at coordinate: ({col}, {row})");
             }
         }
     }
 
-    map_image.save("/tmp/render.png").unwrap();
+    map_image.save(output_file).unwrap();
 
     Ok(())
 }

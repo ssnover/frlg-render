@@ -1,6 +1,6 @@
 use crate::palette::{parse_all_palettes, Palette};
 use byteorder::{LittleEndian, ReadBytesExt};
-use image::{GrayImage, ImageBuffer, Luma, RgbImage};
+use image::{GrayImage, ImageBuffer, Luma, RgbImage, RgbaImage};
 use png::Decoder;
 use std::{
     io::{self, Read},
@@ -23,12 +23,12 @@ pub struct Tileset {
 #[derive(Debug)]
 pub struct Metatile {
     tiles: [TileData; 8],
-    attributes: MetatileAttributes,
+    _attributes: MetatileAttributes,
 }
 
 #[derive(Debug)]
 pub struct MetatileAttributes {
-    layer_type: LayerType,
+    _layer_type: LayerType,
 }
 
 #[derive(Debug)]
@@ -51,7 +51,9 @@ impl From<u32> for MetatileAttributes {
             LayerType::MiddleTop
         };
 
-        MetatileAttributes { layer_type }
+        MetatileAttributes {
+            _layer_type: layer_type,
+        }
     }
 }
 
@@ -70,6 +72,12 @@ impl LayoutTileset {
     ) -> io::Result<LayoutTileset> {
         let primary = Tileset::load_from_path(primary)?;
         let secondary = Tileset::load_from_path(secondary)?;
+        log::info!(
+            "Primary metatiles: {}, secondary: {}",
+            primary.metatiles.len(),
+            secondary.metatiles.len()
+        );
+
         Ok(LayoutTileset { primary, secondary })
     }
 
@@ -77,12 +85,70 @@ impl LayoutTileset {
         let metatile_id = metatile_id as usize;
         let end_of_primary = self.primary.metatiles.len();
         let end_of_secondary = self.secondary.metatiles.len() + end_of_primary;
-        if metatile_id < end_of_primary {
-            log::debug!("Primary; metatile id: {metatile_id}");
-            self.primary.get_metatile_image(metatile_id)
+        let metatile = if metatile_id < end_of_primary {
+            log::info!("Used primary metatile id {metatile_id}");
+            Some(self.primary.get_metatile(metatile_id))
         } else if metatile_id >= end_of_primary && metatile_id < end_of_secondary {
-            log::debug!("Secondary; metatile id: {metatile_id}");
-            self.secondary.get_metatile_image(metatile_id - 640) //end_of_primary)
+            Some(self.secondary.get_metatile(metatile_id - 640))
+        } else {
+            None
+        };
+
+        if let Some(metatile) = metatile {
+            let mut metatile_image: RgbImage = ImageBuffer::new(16, 16);
+
+            for layer in 0..2 {
+                for col in 0..2 {
+                    for row in 0..2 {
+                        let top_layer = layer == 1;
+                        let tile_idx = (layer * 4 + row * 2 + col) as usize;
+
+                        let tileset_tile_id = metatile.tiles[tile_idx].tile_id;
+                        let tile_image = if tileset_tile_id < 640 {
+                            self.primary.get_tile_image(
+                                metatile.tiles[tile_idx].tile_id.into(),
+                                metatile.tiles[tile_idx].flip_vertical,
+                                metatile.tiles[tile_idx].flip_horizontal,
+                                metatile.tiles[tile_idx].palette_number.into(),
+                                &self.primary.tile_image,
+                            )
+                        } else {
+                            self.secondary.get_tile_image(
+                                (metatile.tiles[tile_idx].tile_id - 640).into(),
+                                metatile.tiles[tile_idx].flip_vertical,
+                                metatile.tiles[tile_idx].flip_horizontal,
+                                metatile.tiles[tile_idx].palette_number.into(),
+                                &self.secondary.tile_image,
+                            )
+                        };
+
+                        if let Some(tile_image) = tile_image {
+                            for pixel_row in 0..8 {
+                                for pixel_col in 0..8 {
+                                    let output_row = 8 * row + pixel_row;
+                                    let output_col = 8 * col + pixel_col;
+                                    const ALPHA: usize = 3;
+                                    if top_layer
+                                        && tile_image.get_pixel(pixel_col, pixel_row).0[ALPHA] == 0
+                                    {
+                                        continue;
+                                    }
+                                    metatile_image
+                                        .get_pixel_mut(output_col, output_row)
+                                        .0
+                                        .copy_from_slice(
+                                            &tile_image.get_pixel(pixel_col, pixel_row).0[..=2],
+                                        );
+                                }
+                            }
+                        } else {
+                            log::error!("Failed to get tile image for tile id {tileset_tile_id}");
+                        }
+                    }
+                }
+            }
+
+            Some(metatile_image)
         } else {
             None
         }
@@ -112,60 +178,31 @@ impl Tileset {
         })
     }
 
-    fn get_metatile_image(&self, relative_metatile_id: usize) -> Option<RgbImage> {
-        let metatile = &self.metatiles[relative_metatile_id];
-        let mut metatile_image: RgbImage = ImageBuffer::new(16, 16);
-        for layer in 0..2 {
-            for col in 0..2 {
-                for row in 0..2 {
-                    let tile_idx = (layer * 4 + row * 2 + col) as usize;
-                    if let Some(tile_image) =
-                        self.get_tile_image(&metatile.tiles[tile_idx], &self.tile_image)
-                    {
-                        for pixel_row in 0..8 {
-                            for pixel_col in 0..8 {
-                                let output_row = 8 * row + pixel_row;
-                                let output_col = 8 * col + pixel_col;
-                                metatile_image.get_pixel_mut(output_col, output_row).0 =
-                                    tile_image.get_pixel(pixel_col, pixel_row).0;
-                            }
-                        }
-                    } else {
-                        log::error!(
-                            "Failed to get tile image for tile id {}",
-                            &metatile.tiles[tile_idx].tile_id
-                        );
-                    }
-                }
-            }
-        }
-        Some(metatile_image)
+    fn get_metatile(&self, metatile_id: usize) -> &Metatile {
+        &self.metatiles[metatile_id]
     }
 
     fn get_tile_image(
         &self,
-        tile_data: &TileData,
+        tile_id: usize,
+        flip_vertical: bool,
+        flip_horizontal: bool,
+        palette_number: usize,
         tileset_image: &TilesetImage,
-    ) -> Option<RgbImage> {
-        let gray_tile = tileset_image.get_tile(tile_data.tile_id.into())?;
-        let mut tile_image: RgbImage = ImageBuffer::new(8, 8);
+    ) -> Option<RgbaImage> {
+        let gray_tile = tileset_image.get_tile(tile_id)?;
+        let mut tile_image: RgbaImage = ImageBuffer::new(8, 8);
         for row in 0..8 {
             for col in 0..8 {
-                let tile_row = if !tile_data.flip_vertical {
-                    row
-                } else {
-                    7 - row
-                };
-                let tile_col = if !tile_data.flip_horizontal {
-                    col
-                } else {
-                    7 - col
-                };
+                let tile_row = if !flip_vertical { row } else { 7 - row };
+                let tile_col = if !flip_horizontal { col } else { 7 - col };
 
-                let palette_value = self.palettes[tile_data.palette_number as usize]
+                let palette_value = self.palettes[palette_number]
                     .get(gray_tile.get_pixel(tile_col, tile_row).0[0] as usize);
+                let transparent = gray_tile.get_pixel(tile_col, tile_row).0[0] == 0;
+                let alpha = if transparent { 0 } else { 255 };
                 tile_image.get_pixel_mut(col, row).0 =
-                    [palette_value.0, palette_value.1, palette_value.2];
+                    [palette_value.0, palette_value.1, palette_value.2, alpha];
             }
         }
         Some(tile_image)
@@ -175,7 +212,8 @@ impl Tileset {
 impl From<u16> for TileData {
     fn from(value: u16) -> Self {
         TileData {
-            tile_id: (value & 0x3ff).saturating_sub(640),
+            // okay so I think what is happening here is that a metatile may reference tiles in both the primary and secondary tileset
+            tile_id: (value & 0x3ff), //.saturating_sub(640), // this subtraction is sus
             flip_horizontal: (value & 0x400) != 0,
             flip_vertical: (value & 0x800) != 0,
             palette_number: ((value & 0xf000) >> 12) as u8,
@@ -212,7 +250,6 @@ fn parse_metatile_files(
         let attr = MetatileAttributes::from(attr_data);
 
         let tile_data = (0..8)
-            .into_iter()
             .map(|_| {
                 let tile = cursor.read_u16::<LittleEndian>()?;
                 Ok(TileData::from(tile))
@@ -220,7 +257,7 @@ fn parse_metatile_files(
             .collect::<io::Result<Vec<_>>>()?;
         metatiles.push(Metatile {
             tiles: tile_data.try_into().unwrap(),
-            attributes: attr,
+            _attributes: attr,
         });
     }
 
@@ -250,7 +287,7 @@ impl TilesetImage {
                     let offset = (tileset_pixel_y * (self.tile_width * TILE_PIXEL_DIM)
                         + tileset_pixel_x)
                         / PIXELS_PER_BYTE;
-                    let data = if col % 1 == 0 {
+                    let data = if col % 2 == 0 {
                         // Odd column
                         self.tileset_data[offset] >> 4
                     } else {
